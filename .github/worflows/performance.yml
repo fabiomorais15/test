@@ -3,6 +3,7 @@ name: Lighthouse CI on Vercel Preview
 on:
   pull_request:
 
+
 jobs:
   build-deploy-test:
     runs-on: ubuntu-latest
