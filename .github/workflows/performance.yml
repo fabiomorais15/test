@@ -5,40 +5,67 @@ on:
 
 
 jobs:
-  build-deploy-test:
+  generate_lighthouse_audit:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
-      - name: Use Node.js 16.x
-        uses: actions/setup-node@v3
+      - name: Add comment to PR
+        id: loading_comment_to_pr
+        uses: marocchino/sticky-pull-request-comment@v1
         with:
-          node-version: 18.x
-
-      - name: Install Dependencies
-        run: yarn
-
-      - name: Build App
-        run: yarn run build
-
-      - name: Deploy to Vercel
-        uses: amondnet/vercel-action@v20
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          number: ${{ github.event.issue.number }}
+          header: lighthouse
+          message: |
+            Running Lighthouse audit...
+      - name: Capture Vercel preview URL
+        id: vercel_preview_url
+        uses: aaron-binary/vercel-preview-url-action@v0.0.3
         with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-args: --yes
-
-      - name: Get Vercel Deployment URL
-        id: vercel-deployment
-        run: echo "::set-output name=url::$(vercel deploy --json | jq -r '.url')"
-        
-      - name: Run Lighthouse Tests
-        run: |
-          npm install -g @lhci/cli@0.11.x
-          lhci autorun --url ${{ steps.vercel-deployment.outputs.url }}
-
-      - name: Upload Lighthouse Reports
-        uses: actions/upload-artifact@v2
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v2
+      - name: Audit preview URL with Lighthouse
+        id: lighthouse_audit
+        uses: treosh/lighthouse-ci-action@v3
         with:
-          name: lhci-report
-          path: './.lighthouseci'
+          urls: |
+            ${{ steps.vercel_preview_url.outputs.vercel_preview_url }}
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+      - name: Format lighthouse score
+        id: format_lighthouse_score
+        uses: actions/github-script@v3
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const result = ${{ steps.lighthouse_audit.outputs.manifest }}[0].summary
+            const links = ${{ steps.lighthouse_audit.outputs.links }}
+
+            const formatResult = (res) => Math.round((res * 100))
+            Object.keys(result).forEach(key => result[key] = formatResult(result[key]))
+
+            const score = res => res >= 90 ? '🟢' : res >= 50 ? '🟠' : '🔴'
+
+            const comment = [
+                `⚡️ [Lighthouse report](${Object.values(links)[0]}) for the changes in this PR:`,
+                '| Category | Score |',
+                '| --- | --- |',
+                `| ${score(result.performance)} Performance | ${result.performance} |`,
+                `| ${score(result.accessibility)} Accessibility | ${result.accessibility} |`,
+                `| ${score(result['best-practices'])} Best practices | ${result['best-practices']} |`,
+                `| ${score(result.seo)} SEO | ${result.seo} |`,
+                `| ${score(result.pwa)} PWA | ${result.pwa} |`,
+                ' ',
+                `*Lighthouse ran on [${Object.keys(links)[0]}](${Object.keys(links)[0]})*`
+            ].join('\n')
+
+             core.setOutput("comment", comment); 
+      - name: Add comment to PR
+        id: comment_to_pr
+        uses: marocchino/sticky-pull-request-comment@v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          number: ${{ github.event.issue.number }}
+          header: lighthouse
+          message: |
+            ${{ steps.format_lighthouse_score.outputs.comment }}
