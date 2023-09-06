@@ -5,23 +5,8 @@ on:
 
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Begin linting
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Use Node 18
-        uses: actions/setup-node@v1
-        with:
-          node-version: 18.x
-
-
   deploy:
     runs-on: ubuntu-latest
-    needs: lint
     steps:
       - uses: actions/checkout@v3
       - uses: amondnet/vercel-action@v20
@@ -36,40 +21,68 @@ jobs:
       preview-url: ${{ steps.vercel-deployment.outputs.preview-url }}
 
   lighthouse:
+
     runs-on: ubuntu-latest
     needs: deploy
+    
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Install Node.js
-        uses: actions/setup-node@v2
-        with:
-          node-version: 18
-      
+      - uses: actions/checkout@v3
       - name: Audit URLs using Lighthouse
-        uses: treosh/lighthouse-ci-action@v7
-        with:
-          urls: ${{ needs.deploy.outputs.preview-url }}
-          uploadArtifacts: true # save results as an action artifacts
-          temporaryPublicStorage: true # upload lighthouse audits to google temporary storage
-
-      - name: Install Lighthouse
-        run: npm install -g lighthouse
-
-      - name: Run Lighthouse on URL
-        run: |
-          lighthouse ${{ needs.deploy.outputs.preview-url }} --output json --output-path lighthouse-report.json
-        # Replace 'https://example.com' with the URL you want to test.
-
-      - name: Upload Lighthouse report
-        uses: actions/upload-artifact@v2
-        with:
-          name: lighthouse-report
-          path: lighthouse-report.json
-
-      - name: Run Lighthouse on urls and validate with lighthouserc
-        uses: treosh/lighthouse-ci-action@v7
+        id: lighthouse_audit
+        uses: treosh/lighthouse-ci-action@v10
         with:
           urls: |
             ${{ needs.deploy.outputs.preview-url }}
+          
           runs: 3
+          uploadArtifacts: true # save results as an action artifacts
+          temporaryPublicStorage: true # upload lighthouse report to the temporary storage
+      
+      - name: Debug Output
+        run: |
+          echo "Lighthouse Audit Outputs:"
+          echo "Manifest: ${{ steps.lighthouse_audit.outputs.manifest }}"
+          echo "Links: ${{ steps.lighthouse_audit.outputs.links }}"
+      
+      - name: Format lighthouse result
+        id: lighthouse_result
+        if: ${{ always() }}
+        uses: actions/github-script@v4
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const links = ${{ steps.lighthouse_audit.outputs.links }}
+            const results = (${{ steps.lighthouse_audit.outputs.manifest }}).filter(result => result.isRepresentativeRun);
+
+            const score = res => res >= 90 ? '🟢' : res >= 50 ? '🟠' : '🔴';
+
+            const comment = results.map((result) => {
+            const summary = result.summary;
+            const url = result.url;
+
+            return `
+            🌎 [${url}](${url})
+            ⚡️ [Lighthouse report](${links[url]})
+
+            | Category | Score |
+            | --- | --- |
+            ${Object.keys(summary).map((key) => {
+            const percentage = Math.round(summary[key] * 100);
+            return `| ${score(percentage)} ${key} | ${percentage} |`;
+            }).join('\n')}
+
+            `;
+            }).join('---');
+
+            core.setOutput("comment", comment);    
+      
+      - name: Add Lighthouse comment to PR
+        id: lighthouse_comment_to_pr
+        if: ${{ always() }}
+        uses: marocchino/sticky-pull-request-comment@v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          number: ${{ github.event.pull_request.number }}
+          header: lighthouse
+          message: |
+            ${{ steps.lighthouse_result.outputs.comment }}    
