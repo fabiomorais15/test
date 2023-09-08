@@ -1,0 +1,116 @@
+name: Lighthouse CI on Vercel Preview
+env:
+  VERCEL_ORG_ID: ${{ secrets.ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }} 
+
+on:
+  pull_request:
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Use Node.js 18.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18.x
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+  
+      - name: Pull Vercel Environment Information
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+      - name: Build Project Artifacts
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+        
+      - name: Deploy Project Artifacts to Vercel
+        id: deploy
+        run: |
+            deployment_output=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+            echo "Deployment Output: $deployment_output"
+            
+            # Extract Preview URL using regex
+            preview_url=$(echo "$deployment_output" | grep -o "https://[^ ]*.vercel.app")
+            echo "preview_url=$preview_url" >> $GITHUB_OUTPUT
+    outputs:
+      preview_url: ${{ steps.deploy.outputs.preview_url }}
+
+  lighthouse:
+    needs: build-deploy
+    runs-on: ubuntu-latest
+    permissions: write-all
+
+    steps:
+      - name: Sleep
+        run: sleep 10
+   
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+
+
+      
+      - name: Audit URLs using Lighthouse
+        id: lighthouse_audit
+        uses: treosh/lighthouse-ci-action@v10
+        with:
+          urls: |
+            ${{ needs.build-deploy.outputs.preview_url }}
+            ${{ needs.build-deploy.outputs.preview_url }}/example
+          
+          runs: 1
+          uploadArtifacts: true # save results as an action artifacts
+          temporaryPublicStorage: true # upload lighthouse report to the temporary storage
+      
+      - name: Format lighthouse result
+        id: lighthouse_result
+        if: ${{ always() }}
+        uses: actions/github-script@v6
+        with:
+            github-token: ${{secrets.GITHUB_TOKEN}}
+            script: |
+                const links = ${{ steps.lighthouse_audit.outputs.links }};
+                const results = (${{ steps.lighthouse_audit.outputs.manifest }}).filter(result => result.isRepresentativeRun);
+          
+                const score = res => res >= 90 ? '🟢' : res >= 50 ? '🟠' : '🔴';
+          
+                const comment = results.map((result) => {
+                  const summary = result.summary;
+                  const url = result.url;
+                  
+                  // Get the path from the URL
+                  const urlPath = new URL(url).pathname;
+          
+                  return `
+                  ## 🌐 Page $\\textcolor{red}{\\textsf{ ${urlPath} }}$
+                  ⚡️ [Lighthouse report for ${urlPath}](${links[url]})
+          
+                  | Category | Score |
+                  | --- | --- |
+                  ${Object.keys(summary).map((key) => {
+                    const percentage = Math.round(summary[key] * 100);
+                    return `| ${score(percentage)} ${key} | ${percentage} |`;
+                  }).join('\n')}
+                  `;
+                }).join('---');
+          
+                core.setOutput("comment", comment);    
+      
+      - name: Add Lighthouse comment to PR
+        id: lighthouse_comment_to_pr
+        if: ${{ always() }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          number: ${{ github.event.pull_request.number }}
+          header: lighthouse
+          message: |
+            ${{ steps.lighthouse_result.outputs.comment }}    
+
+      - name: Sleep
+        run: sleep 10
+      - name: Delete vercel deploy
+        run: |
+          vercel rm ${{ needs.build-deploy.outputs.preview_url }} --token=${{ secrets.VERCEL_TOKEN }} --yes --debug   
